@@ -8,7 +8,7 @@
         body { font-family: sans-serif; max-width: 600px; margin: 20px auto; padding: 10px; line-height: 1.6; }
         .box { border: 2px dashed #ccc; padding: 20px; text-align: center; border-radius: 8px; background: #f9f9f9; }
         button { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-size: 16px; margin-top: 10px; }
-        button:disabled { background: #ccc; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
         #status { margin-top: 15px; font-weight: bold; color: #333; }
     </style>
 </head>
@@ -18,15 +18,11 @@
     <p>Ogg、MP3、WAVファイルを選択して、音高（ピッチ）を解析し、簡易的なMusicXML楽譜データを生成します。</p>
 
     <div class="box">
-        <!-- Ogg, MP3, WAV に対応 -->
         <input type="file" id="audioFile" accept=".mp3,.wav,.ogg,audio/*"><br>
         <button id="convertBtn" disabled>楽譜(MusicXML)に変換</button>
     </div>
 
     <div id="status">ファイルを選択してください。</div>
-
-    <!-- ピッチ検出に必要な外部ライブラリ (Aubio.js) の読み込み -->
-    <script src="https://jsdelivr.net"></script>
 
     <script>
         const fileInput = document.getElementById('audioFile');
@@ -38,72 +34,78 @@
         fileInput.addEventListener('change', () => {
             if (fileInput.files.length > 0) {
                 convertBtn.disabled = false;
-                statusDiv.innerText = "変換ボタンを押してください。";
+                statusDiv.innerText = "ボタンを押して変換を開始してください。";
+            } else {
+                convertBtn.disabled = true;
+                statusDiv.innerText = "ファイルを選択してください。";
             }
         });
 
         convertBtn.addEventListener('click', async () => {
-            const file = fileInput.files[0];
-            if (!file) return;
+            const files = fileInput.files;
+            if (files.length === 0) return;
+            const file = files[0];
 
             convertBtn.disabled = true;
-            statusDiv.innerText = "音声をデコード中...";
+            statusDiv.innerText = "オーディオシステムを再開中...";
 
-            // 1. オーディオコンテキストの初期化とファイル読み込み
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            const arrayBuffer = await file.arrayBuffer();
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
+
+            statusDiv.innerText = "音声ファイルをデコード中...";
             
             try {
+                const arrayBuffer = await file.arrayBuffer();
                 const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-                statusDiv.innerText = "音高を解析中（耳コピ中）...";
                 
-                // 2. 音声データの解析（ピッチ検出）
-                const notes = analyzePitch(audioBuffer);
+                statusDiv.innerText = "音高を高速解析中（耳コピ中）...";
+                // 遅延の原因だった外部ライブラリを使わず、内製アルゴリズムで解析
+                const notes = analyzePitchNative(audioBuffer);
                 
                 if (notes.length === 0) {
-                    statusDiv.innerText = "エラー: 音符が検出されませんでした。";
+                    statusDiv.innerText = "エラー: 音符が検出されませんでした。音が小さいか、和音が多い可能性があります。";
                     convertBtn.disabled = false;
                     return;
                 }
 
                 statusDiv.innerText = "MusicXMLファイルを生成中...";
-                // 3. 検出した音符からMusicXMLテキストを生成
                 const xmlString = generateMusicXML(notes);
                 
-                // 4. ファイルとしてダウンロード
-                downloadXML(xmlString, file.name.split('.')[0] + '.musicxml');
-                statusDiv.innerText = "変換完了！ダウンロードされました。";
+                const outputName = file.name.substring(0, file.name.lastIndexOf('.')) + '.musicxml';
+                downloadXML(xmlString, outputName);
+                statusDiv.innerText = "変換完了！楽譜ファイルがダウンロードされました。";
             } catch (error) {
                 console.error(error);
-                statusDiv.innerText = "デコードに失敗しました。ファイルが破損しているか、ブラウザが未対応の形式です。";
+                statusDiv.innerText = "エラーが発生しました。ファイルのデコードに失敗した可能性があります。";
             }
             convertBtn.disabled = false;
         });
 
-        // ピッチ（周波数）を検出して音符データに変換する関数
-        function analyzePitch(audioBuffer) {
-            const channelData = audioBuffer.getChannelData(0); // モノラルとして解析
+        // 外部ライブラリを使わない、軽量な自己相関法（Autocorrelation）によるピッチ検出
+        function analyzePitchNative(audioBuffer) {
+            const channelData = audioBuffer.getChannelData(0);
             const sampleRate = audioBuffer.sampleRate;
             const bufferSize = 2048;
             const notes = [];
-
-            // Aubioライブラリのピッチ検出インスタンス（YINアルゴリズム）
-            const pitchDetector = new aubio.Pitch('yin', bufferSize, bufferSize / 2, sampleRate);
-            
             let previousMidi = -1;
 
-            for (let i = 0; i < channelData.length; i += bufferSize / 2) {
-                const stepData = channelData.subarray(i, i + bufferSize);
-                if (stepData.length < bufferSize) break;
+            // 100msごとにサンプリングして解析
+            const hopSize = Math.floor(sampleRate * 0.1); 
 
-                const frequency = pitchDetector.do(stepData);
+            for (let i = 0; i < channelData.length - bufferSize; i += hopSize) {
+                const signal = channelData.subarray(i, i + bufferSize);
+                
+                // 自作のピッチ検出アルゴリズムを実行
+                const frequency = autoCorrelate(signal, sampleRate);
                 
                 if (frequency > 0) {
-                    // 周波数をMIDIノート番号（例: 60 = ド）に変換
                     const midiNote = Math.round(12 * Math.log2(frequency / 440) + 69);
-                    
-                    // 認識可能な音域（ピアノの範囲内など）に制限
-                    if (midiNote >= 21 && midiNote <= 108) {
+                    // 人間の歌声や一般的な楽器の範囲（C2〜C7程度）に限定
+                    if (midiNote >= 36 && midiNote <= 96) {
                         if (midiNote !== previousMidi) {
                             notes.push(midiNote);
                             previousMidi = midiNote;
@@ -111,21 +113,65 @@
                     }
                 }
             }
-            return notes.slice(0, 100); // サンプルとして最初の100音に制限
+            return notes.slice(0, 200); // 最大200音まで
         }
 
-        // MIDI番号をMusicXMLの音名とオクターブに変換するマップ
+        // 自己相関関数（音の周期性から周波数を割り出す）
+        function autoCorrelate(buffer, sampleRate) {
+            let SIZE = buffer.length;
+            let rms = 0;
+
+            for (let i = 0; i < SIZE; i++) {
+                let val = buffer[i];
+                rms += val * val;
+            }
+            rms = Math.sqrt(rms / SIZE);
+            if (rms < 0.01) return -1; // 音が小さすぎる場合は無視
+
+            let r1 = 0, r2 = SIZE - 1;
+            let thres = 0.2;
+            for (let i = 0; i < SIZE / 2; i++) {
+                if (Math.abs(buffer[i]) < thres) { r1 = i; break; }
+            }
+            for (let i = SIZE - 1; i >= SIZE / 2; i--) {
+                if (Math.abs(buffer[i]) < thres) { r2 = i; break; }
+            }
+
+            buffer = buffer.slice(r1, r2);
+            SIZE = buffer.length;
+
+            let c = new Float32Array(SIZE);
+            for (let i = 0; i < SIZE; i++) {
+                for (let j = 0; j < SIZE - i; j++) {
+                    c[i] = c[i] + buffer[j] * buffer[j + i];
+                }
+            }
+
+            let d = 0;
+            while (c[d] > c[d + 1]) d++;
+            let maxval = -1, maxpos = -1;
+            for (let i = d; i < SIZE / 2; i++) {
+                if (c[i] > maxval) {
+                    maxval = c[i];
+                    maxpos = i;
+                }
+            }
+
+            let T0 = maxpos;
+            if (T0 > 0) {
+                return sampleRate / T0;
+            }
+            return -1;
+        }
+
         const MIDI_MAP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
         
-        // 簡易的なMusicXMLフォーマットを出力する関数
         function generateMusicXML(notes) {
             let xml = `<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://musicxml.org">
 <score-partwise version="4.0">
   <part-list>
-    <score-part id="P1">
-      <part-name>Audio Track</part-name>
-    </score-part>
+    <score-part id="P1"><part-name>Awaken Track</part-name></score-part>
   </part-list>
   <part id="P1">
     <measure number="1">
@@ -159,7 +205,6 @@
             return xml;
         }
 
-        // 生成されたXMLファイルをブラウザからダウンロードさせる関数
         function downloadXML(content, fileName) {
             const blob = new Blob([content], { type: 'application/vnd.recordare.musicxml+xml' });
             const a = document.createElement('a');
