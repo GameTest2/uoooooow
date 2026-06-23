@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>音声からMusicXML変換装置（完全版）</title>
+    <title>音声からMusicXML変換装置（完全長尺版）</title>
     <style>
         body { font-family: sans-serif; max-width: 600px; margin: 20px auto; padding: 10px; line-height: 1.6; }
         .box { border: 2px dashed #ccc; padding: 20px; text-align: center; border-radius: 8px; background: #f9f9f9; }
@@ -14,12 +14,12 @@
 </head>
 <body>
 
-    <h2>🎼 音声ファイル ➔ MusicXML 変換装置</h2>
-    <p>Ogg、MP3、WAVファイルを選択して、BPMと正確な音の長さを解析し、Flat対応の楽譜データを生成します。</p>
+    <h2>🎼 音声ファイル ➔ MusicXML 変換装置（長尺対応）</h2>
+    <p>1分55秒などの楽曲全体をフルスキャンし、BPMと音の長さを16分音符単位で正確に計算します。</p>
 
     <div class="box">
         <input type="file" id="audioFile" accept=".mp3,.wav,.ogg,audio/*"><br>
-        <button id="convertBtn" disabled>楽譜(MusicXML)に変換</button>
+        <button id="convertBtn" disabled>楽曲全体を解析して変換</button>
     </div>
 
     <div id="status">ファイルを選択してください。</div>
@@ -56,17 +56,16 @@
                 await audioContext.resume();
             }
 
-            statusDiv.innerText = "音声ファイルをデコード中...";
+            statusDiv.innerText = "長尺音声ファイルをデコード中（数十秒かかる場合があります）...";
             
             try {
                 const arrayBuffer = await file.arrayBuffer();
                 const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
                 
-                statusDiv.innerText = "楽曲のテンポ（BPM）を解析中...";
+                statusDiv.innerText = "楽曲全体のテンポ（BPM）を解析中...";
                 const detectedBPM = estimateBPM(audioBuffer);
                 
-                statusDiv.innerText = "音符とリズム（音の長さ）を精密解析中...";
-                // ★この後、後半コードの「analyzePreciseNotes」を呼び出します
+                statusDiv.innerText = `BPM ${detectedBPM} を基準に、全小節のリズムを精密解析中...`;
                 const notes = analyzePreciseNotes(audioBuffer, detectedBPM);
                 
                 if (notes.length === 0) {
@@ -75,12 +74,12 @@
                     return;
                 }
 
-                statusDiv.innerText = "MusicXMLファイルを生成中...";
+                statusDiv.innerText = "MusicXMLファイルを書き出し中...";
                 const xmlString = generateMusicXML(notes, detectedBPM);
                 
-                const outputName = file.name.substring(0, file.name.lastIndexOf('.')) + '.musicxml';
+                const outputName = file.name.substring(0, file.name.lastIndexOf('.')) + '_full.musicxml';
                 downloadXML(xmlString, outputName);
-                statusDiv.innerText = `変換完了！BPM ${detectedBPM} で楽譜をダウンロードしました。`;
+                statusDiv.innerText = `変換完了！BPM ${detectedBPM}、全小節を無事に出力しました。`;
             } catch (error) {
                 console.error(error);
                 statusDiv.innerText = "エラーが発生しました。デコードに失敗した可能性があります。";
@@ -88,7 +87,7 @@
             convertBtn.disabled = false;
         });
 
-        // 🎵 BPM（テンポ）の自動判定ロジック
+        // 🎵 前半：テンポ（BPM）自動検出
         function estimateBPM(audioBuffer) {
             const data = audioBuffer.getChannelData(0);
             const sampleRate = audioBuffer.sampleRate;
@@ -129,22 +128,19 @@
 
             return bpm;
         }
-        // 🎵 【後半】音高と「音の長さ（リズム）」を精密に検出するロジック
+        // 🎵 後半：音高と音の長さ（全小節）を網羅する精密検出ロジック
         function analyzePreciseNotes(audioBuffer, bpm) {
             const channelData = audioBuffer.getChannelData(0);
             const sampleRate = audioBuffer.sampleRate;
             const bufferSize = 2048;
             
-            // 1拍あたりの秒数、および16分音符1つあたりの秒数をBPMから計算
             const secondsPerBeat = 60 / bpm;
             const secondsPer16th = secondsPerBeat / 4; 
-
-            // 解析の間隔（ホップサイズ）を16分音符の長さに同期させる
             const hopSize = Math.floor(sampleRate * secondsPer16th);
 
             const rawTimeline = [];
 
-            // 1. 各時間軸（16分音符ごと）のピッチを網羅的にスキャン
+            // 曲の最初から最後まで、16分音符の細かさで全タイムラインを網羅スキャン
             for (let i = 0; i < channelData.length - bufferSize; i += hopSize) {
                 const signal = channelData.subarray(i, i + bufferSize);
                 const frequency = autoCorrelate(signal, sampleRate);
@@ -156,35 +152,34 @@
                         continue;
                     }
                 }
-                rawTimeline.push(-1); // 音が検出されなかった（休符候補）
+                rawTimeline.push(-1); // 音が鳴っていない時間は休符として記録
             }
 
             const processedNotes = [];
+            if (rawTimeline.length === 0) return processedNotes;
+
             let currentMidi = rawTimeline[0];
             let currentDurationCount = 1;
 
-            // 2. 同じ音が何個（16分音符いくつ分）連続したかをカウントして長さを割り出す
+            // 同じ音（または休符）が何カウント分続いたかを計測
             for (let i = 1; i < rawTimeline.length; i++) {
                 if (rawTimeline[i] === currentMidi) {
                     currentDurationCount++;
                 } else {
-                    if (currentMidi !== -1) {
-                        // 16分音符の個数（durationCount）から楽譜上の音符タイプに変換
-                        const noteTypeInfo = getNoteTypeByDuration(currentDurationCount);
-                        processedNotes.push({
-                            midi: currentMidi,
-                            duration: currentDurationCount, // divisions=4 のため、1 = 16分音符、4 = 4分音符
-                            type: noteTypeInfo.type,
-                            dot: noteTypeInfo.dot
-                        });
-                    }
+                    const noteTypeInfo = getNoteTypeByDuration(currentDurationCount);
+                    processedNotes.push({
+                        midi: currentMidi,
+                        duration: currentDurationCount,
+                        type: noteTypeInfo.type,
+                        dot: noteTypeInfo.dot
+                    });
                     currentMidi = rawTimeline[i];
                     currentDurationCount = 1;
                 }
             }
             
-            // 最後の残り音を処理
-            if (currentMidi !== -1 && currentDurationCount > 0) {
+            // 最後の小節の余り音を漏らさず追加
+            if (currentDurationCount > 0) {
                 const noteTypeInfo = getNoteTypeByDuration(currentDurationCount);
                 processedNotes.push({
                     midi: currentMidi,
@@ -194,7 +189,8 @@
                 });
             }
 
-            return processedNotes.slice(0, 300); // Flatの処理負荷を考慮し最大300音に制限
+            // ★制限を解除し、1分55秒の全データを最後まで出力（最大3000音まで確保）
+            return processedNotes.slice(0, 3000);
         }
 
         // 内部ピッチ検出（自己相関法）
@@ -230,26 +226,26 @@
             return -1;
         }
 
-        // 16分音符のカウント数から、MusicXML規格の音符タイプを返す関数
+        // 16分音符の個数をMusicXML規格の音符タイプに紐付け
         function getNoteTypeByDuration(count) {
-            if (count >= 16) return { type: "whole", dot: false };       // 全音符 (16歩)
-            if (count >= 12) return { type: "half", dot: true };         // 付点2分音符 (12歩)
-            if (count >= 8)  return { type: "half", dot: false };        // 2分音符 (8歩)
-            if (count >= 6)  return { type: "quarter", dot: true };      // 付点4分音符 (6歩)
-            if (count >= 4)  return { type: "quarter", dot: false };     // 4分音符 (4歩)
-            if (count >= 3)  return { type: "eighth", dot: true };       // 付点8分音符 (3歩)
-            if (count >= 2)  return { type: "eighth", dot: false };      // 8分音符 (2歩)
-            return { type: "16th", dot: false };                         // 16分音符 (1歩)
+            if (count >= 16) return { type: "whole", dot: false };
+            if (count >= 12) return { type: "half", dot: true };
+            if (count >= 8)  return { type: "half", dot: false };
+            if (count >= 6)  return { type: "quarter", dot: true };
+            if (count >= 4)  return { type: "quarter", dot: false };
+            if (count >= 3)  return { type: "eighth", dot: true };
+            if (count >= 2)  return { type: "eighth", dot: false };
+            return { type: "16th", dot: false };
         }
 
         const MIDI_MAP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
         
-        // 精密化されたMusicXMLデータの生成
+        // MusicXMLデータの生成（無限小節ループ対応）
         function generateMusicXML(notes, bpm) {
             let xml = `<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://musicxml.org">
 <score-partwise version="4.0">
-  <work><work-title>Awaken Precise Score</work-title></work>
+  <work><work-title>Awaken Full Score</work-title></work>
   <part-list>
     <score-part id="P1"><part-name>Audio Track</part-name></score-part>
   </part-list>
@@ -257,12 +253,12 @@
 
             let measureNumber = 1;
             let currentMeasureDuration = 0;
-            const maxMeasureDuration = 16; // 4/4拍子において、16分音符16個分で1小節
+            const maxMeasureDuration = 16; // 4/4拍子（16分音符16個分で1小節）
 
-            // 第1小節のヘッダーを出力
+            // 第1小節のヘッダー
             xml += `    <measure number="${measureNumber}">
       <attributes>
-        <divisions>4</divisions> <!-- 1拍を4分割して16分音符に対応 -->
+        <divisions>4</divisions>
         <key><fifths>0</fifths></key>
         <time><beats>4</beats><beat-type>4</beat-type></time>
         <clef><sign>G</sign><line>2</line></clef>
@@ -275,35 +271,59 @@
       </direction>\n`;
 
             notes.forEach(note => {
-                // 今回の音符を入れると1小節（16カウント）を超える場合、小節をまたぐ処理を行う
-                if (currentMeasureDuration + note.duration > maxMeasureDuration) {
-                    xml += `    </measure>\n`;
-                    measureNumber++;
-                    xml += `    <measure number="${measureNumber}">\n`;
-                    currentMeasureDuration = 0;
-                }
+                let remainingDuration = note.duration;
 
-                const step = MIDI_MAP[note.midi % 12];
-                const alter = step.includes('#') ? 1 : 0;
-                const stepName = step.replace('#', '');
-                const octave = Math.floor(note.midi / 12) - 1;
+                // 音符の長さが現在の小節の残り枠を超える場合、小節をまたぐループ処理
+                while (remainingDuration > 0) {
+                    let availableSpace = maxMeasureDuration - currentMeasureDuration;
+                    
+                    if (availableSpace <= 0) {
+                        xml += `    </measure>\n`;
+                        measureNumber++;
+                        xml += `    <measure number="${measureNumber}">\n`;
+                        currentMeasureDuration = 0;
+                        availableSpace = maxMeasureDuration;
+                    }
 
-                xml += `      <note>
+                    // 現在の小節に収まる分の長さを切り出す
+                    let durationToInsert = Math.min(remainingDuration, availableSpace);
+                    let typeInfo = getNoteTypeByDuration(durationToInsert);
+
+                    if (note.midi === -1) {
+                        // ★無音区間は「休符（rest）」として正しく処理
+                        xml += `      <note>
+        <rest/>
+        <duration>${durationToInsert}</duration>
+        <voice>1</voice>
+        <type>${typeInfo.type}</type>
+        ${typeInfo.dot ? '<dot/>' : ''}
+      </note>\n`;
+                    } else {
+                        // ★有音区間は「音符」として処理
+                        const step = MIDI_MAP[note.midi % 12];
+                        const alter = step.includes('#') ? 1 : 0;
+                        const stepName = step.replace('#', '');
+                        const octave = Math.floor(note.midi / 12) - 1;
+
+                        xml += `      <note>
         <pitch>
           <step>${stepName}</step>
           ${alter ? '<alter>1</alter>' : ''}
           <octave>${octave}</octave>
         </pitch>
-        <duration>${note.duration}</duration>
+        <duration>${durationToInsert}</duration>
         <voice>1</voice>
-        <type>${note.type}</type>
-        ${note.dot ? '<dot/>' : ''}
+        <type>${typeInfo.type}</type>
+        ${typeInfo.dot ? '<dot/>' : ''}
       </note>\n`;
-                
-                currentMeasureDuration += note.duration;
+                    }
+
+                    currentMeasureDuration += durationToInsert;
+                    remainingDuration -= durationToInsert;
+                }
             });
 
-            // 残りの小節末尾を閉じて、XML・スクリプト・HTML全体のタグを終了させる
+            // 最後の小節を閉じ、全体のHTML構造を締めくくる
             xml += `    </measure>
   </part>
 </score-partwise>`;
