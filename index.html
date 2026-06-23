@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>音声からMusicXML変換装置</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 20px auto; padding: 10px; line-height: 1.6; }
+        .box { border: 2px dashed #ccc; padding: 20px; text-align: center; border-radius: 8px; background: #f9f9f9; }
+        button { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-size: 16px; margin-top: 10px; }
+        button:disabled { background: #ccc; }
+        #status { margin-top: 15px; font-weight: bold; color: #333; }
+    </style>
+</head>
+<body>
+
+    <h2>🎼 音声ファイル ➔ MusicXML 変換装置</h2>
+    <p>Ogg、MP3、WAVファイルを選択して、音高（ピッチ）を解析し、簡易的なMusicXML楽譜データを生成します。</p>
+
+    <div class="box">
+        <!-- Ogg, MP3, WAV に対応 -->
+        <input type="file" id="audioFile" accept=".mp3,.wav,.ogg,audio/*"><br>
+        <button id="convertBtn" disabled>楽譜(MusicXML)に変換</button>
+    </div>
+
+    <div id="status">ファイルを選択してください。</div>
+
+    <!-- ピッチ検出に必要な外部ライブラリ (Aubio.js) の読み込み -->
+    <script src="https://jsdelivr.net"></script>
+
+    <script>
+        const fileInput = document.getElementById('audioFile');
+        const convertBtn = document.getElementById('convertBtn');
+        const statusDiv = document.getElementById('status');
+        
+        let audioContext;
+
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) {
+                convertBtn.disabled = false;
+                statusDiv.innerText = "変換ボタンを押してください。";
+            }
+        });
+
+        convertBtn.addEventListener('click', async () => {
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            convertBtn.disabled = true;
+            statusDiv.innerText = "音声をデコード中...";
+
+            // 1. オーディオコンテキストの初期化とファイル読み込み
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const arrayBuffer = await file.arrayBuffer();
+            
+            try {
+                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                statusDiv.innerText = "音高を解析中（耳コピ中）...";
+                
+                // 2. 音声データの解析（ピッチ検出）
+                const notes = analyzePitch(audioBuffer);
+                
+                if (notes.length === 0) {
+                    statusDiv.innerText = "エラー: 音符が検出されませんでした。";
+                    convertBtn.disabled = false;
+                    return;
+                }
+
+                statusDiv.innerText = "MusicXMLファイルを生成中...";
+                // 3. 検出した音符からMusicXMLテキストを生成
+                const xmlString = generateMusicXML(notes);
+                
+                // 4. ファイルとしてダウンロード
+                downloadXML(xmlString, file.name.split('.')[0] + '.musicxml');
+                statusDiv.innerText = "変換完了！ダウンロードされました。";
+            } catch (error) {
+                console.error(error);
+                statusDiv.innerText = "デコードに失敗しました。ファイルが破損しているか、ブラウザが未対応の形式です。";
+            }
+            convertBtn.disabled = false;
+        });
+
+        // ピッチ（周波数）を検出して音符データに変換する関数
+        function analyzePitch(audioBuffer) {
+            const channelData = audioBuffer.getChannelData(0); // モノラルとして解析
+            const sampleRate = audioBuffer.sampleRate;
+            const bufferSize = 2048;
+            const notes = [];
+
+            // Aubioライブラリのピッチ検出インスタンス（YINアルゴリズム）
+            const pitchDetector = new aubio.Pitch('yin', bufferSize, bufferSize / 2, sampleRate);
+            
+            let previousMidi = -1;
+
+            for (let i = 0; i < channelData.length; i += bufferSize / 2) {
+                const stepData = channelData.subarray(i, i + bufferSize);
+                if (stepData.length < bufferSize) break;
+
+                const frequency = pitchDetector.do(stepData);
+                
+                if (frequency > 0) {
+                    // 周波数をMIDIノート番号（例: 60 = ド）に変換
+                    const midiNote = Math.round(12 * Math.log2(frequency / 440) + 69);
+                    
+                    // 認識可能な音域（ピアノの範囲内など）に制限
+                    if (midiNote >= 21 && midiNote <= 108) {
+                        if (midiNote !== previousMidi) {
+                            notes.push(midiNote);
+                            previousMidi = midiNote;
+                        }
+                    }
+                }
+            }
+            return notes.slice(0, 100); // サンプルとして最初の100音に制限
+        }
+
+        // MIDI番号をMusicXMLの音名とオクターブに変換するマップ
+        const MIDI_MAP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        
+        // 簡易的なMusicXMLフォーマットを出力する関数
+        function generateMusicXML(notes) {
+            let xml = `<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://musicxml.org">
+<score-partwise version="4.0">
+  <part-list>
+    <score-part id="P1">
+      <part-name>Audio Track</part-name>
+    </score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <key><fifths>0</fifths></key>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>\n`;
+
+            notes.forEach(midi => {
+                const step = MIDI_MAP[midi % 12];
+                const alter = step.includes('#') ? 1 : 0;
+                const stepName = step.replace('#', '');
+                const octave = Math.floor(midi / 12) - 1;
+
+                xml += `      <note>
+        <pitch>
+          <step>${stepName}</step>
+          ${alter ? '<alter>1</alter>' : ''}
+          <octave>${octave}</octave>
+        </pitch>
+        <duration>1</duration>
+        <type>quarter</type>
+      </note>\n`;
+            });
+
+            xml += `    </measure>
+  </part>
+</score-partwise>`;
+            return xml;
+        }
+
+        // 生成されたXMLファイルをブラウザからダウンロードさせる関数
+        function downloadXML(content, fileName) {
+            const blob = new Blob([content], { type: 'application/vnd.recordare.musicxml+xml' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+    </script>
+</body>
+</html>
