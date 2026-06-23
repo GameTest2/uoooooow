@@ -3,23 +3,38 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>音声からMusicXML変換装置（完全長尺版）</title>
+    <title>リアルタイム可視化・多重音MusicXML変換装置</title>
     <style>
         body { font-family: sans-serif; max-width: 600px; margin: 20px auto; padding: 10px; line-height: 1.6; }
-        .box { border: 2px dashed #ccc; padding: 20px; text-align: center; border-radius: 8px; background: #f9f9f9; }
-        button { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-size: 16px; margin-top: 10px; }
+        .box { border: 2px dashed #007bff; padding: 25px; text-align: center; border-radius: 12px; background: #f0f7ff; }
+        button { background: #007bff; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-size: 16px; margin-top: 10px; font-weight: bold; }
         button:disabled { background: #ccc; cursor: not-allowed; }
-        #status { margin-top: 15px; font-weight: bold; color: #333; }
+        #status { margin-top: 15px; font-weight: bold; color: #333; white-space: pre-line; }
+        /* リアルタイムカウンター用のインジケーターUI */
+        .monitor-panel { margin-top: 15px; padding: 15px; background: #222; color: #00ff00; font-family: monospace; border-radius: 6px; text-align: left; box-shadow: inset 0 0 10px #000; }
+        .monitor-line { margin: 4px 0; font-size: 14px; }
+        .progress-bar { width: 100%; background: #444; height: 12px; border-radius: 6px; overflow: hidden; margin-top: 10px; }
+        .progress-fill { width: 0%; background: #00ff00; height: 100%; transition: width 0.1s; }
     </style>
 </head>
 <body>
 
-    <h2>🎼 音声ファイル ➔ MusicXML 変換装置（長尺対応）</h2>
-    <p>1分55秒などの楽曲全体をフルスキャンし、BPMと音の長さを16分音符単位で正確に計算します。</p>
+    <h2>🎼 リアルタイム可視化 ➔ MusicXML 変換装置</h2>
+    <p>FFTによる周波数解析の進捗、現在の検知周波数、配置された音符の数をリアルタイムで画面に表示します。</p>
 
     <div class="box">
         <input type="file" id="audioFile" accept=".mp3,.wav,.ogg,audio/*"><br>
-        <button id="convertBtn" disabled>楽曲全体を解析して変換</button>
+        <button id="convertBtn" disabled>楽曲をリアルタイム解析</button>
+    </div>
+
+    <!-- 📊 リアルタイムに数値を叩き出すモニター画面 -->
+    <div class="monitor-panel">
+        <div class="monitor-line">【ステータス】 <span id="monStatus" style="color: #fff;">待機中</span></div>
+        <div class="monitor-line">【推定テンポ】 <span id="monBpm">-</span> BPM</div>
+        <div class="monitor-line">【現在の進捗】 <span id="monPercent">0</span> %</div>
+        <div class="monitor-line">【検知周波数】 <span id="monFreq">-</span> Hz</div>
+        <div class="monitor-line">【設置音符数】 <span id="monNoteCount">0</span> 個</div>
+        <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
     </div>
 
     <div id="status">ファイルを選択してください。</div>
@@ -29,15 +44,20 @@
         const convertBtn = document.getElementById('convertBtn');
         const statusDiv = document.getElementById('status');
         
+        // モニター用DOMの取得
+        const monStatus = document.getElementById('monStatus');
+        const monBpm = document.getElementById('monBpm');
+        const monPercent = document.getElementById('monPercent');
+        const monFreq = document.getElementById('monFreq');
+        const monNoteCount = document.getElementById('monNoteCount');
+        const progressFill = document.getElementById('progressFill');
+        
         let audioContext;
 
         fileInput.addEventListener('change', () => {
             if (fileInput.files.length > 0) {
                 convertBtn.disabled = false;
-                statusDiv.innerText = "ボタンを押して変換を開始してください。";
-            } else {
-                convertBtn.disabled = true;
-                statusDiv.innerText = "ファイルを選択してください。";
+                statusDiv.innerText = "ボタンを押して高度解析を開始してください。";
             }
         });
 
@@ -47,47 +67,40 @@
             const file = files[0];
 
             convertBtn.disabled = true;
-            statusDiv.innerText = "オーディオシステムを再開中...";
+            monStatus.innerText = "システム起動中";
 
             if (!audioContext) {
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
             }
-            if (audioContext.state === 'suspended') {
-                await audioContext.resume();
-            }
+            if (audioContext.state === 'suspended') { await audioContext.resume(); }
 
-            statusDiv.innerText = "長尺音声ファイルをデコード中（数十秒かかる場合があります）...";
+            statusDiv.innerText = "音声ファイルを高度デコード中...";
+            monStatus.innerText = "デコード中";
             
             try {
                 const arrayBuffer = await file.arrayBuffer();
                 const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
                 
-                statusDiv.innerText = "楽曲全体のテンポ（BPM）を解析中...";
+                statusDiv.innerText = "楽曲全体のテンポ（BPM）を物理スキャン中...";
+                monStatus.innerText = "BPMスキャン";
                 const detectedBPM = estimateBPM(audioBuffer);
+                monBpm.innerText = detectedBPM;
                 
-                statusDiv.innerText = `BPM ${detectedBPM} を基準に、全小節のリズムを精密解析中...`;
-                const notes = analyzePreciseNotes(audioBuffer, detectedBPM);
+                statusDiv.innerText = "FFTによる和音・スペクトル解析を実行中...";
+                monStatus.innerText = "FFT解析中";
                 
-                if (notes.length === 0) {
-                    statusDiv.innerText = "エラー: 音符が検出されませんでした。";
-                    convertBtn.disabled = false;
-                    return;
-                }
-
-                statusDiv.innerText = "MusicXMLファイルを書き出し中...";
-                const xmlString = generateMusicXML(notes, detectedBPM);
+                // ★グラフィックスと文字をリアルタイム更新するため、非同期呼び出しを後半にバトンタッチ
+                analyzePolyphonicNotesAsync(audioBuffer, detectedBPM, file.name);
                 
-                const outputName = file.name.substring(0, file.name.lastIndexOf('.')) + '_full.musicxml';
-                downloadXML(xmlString, outputName);
-                statusDiv.innerText = `変換完了！BPM ${detectedBPM}、全小節を無事に出力しました。`;
             } catch (error) {
                 console.error(error);
-                statusDiv.innerText = "エラーが発生しました。デコードに失敗した可能性があります。";
+                statusDiv.innerText = "解析エラーが発生しました。ファイル形式を確認してください。";
+                monStatus.innerText = "エラー終了";
+                convertBtn.disabled = false;
             }
-            convertBtn.disabled = false;
         });
 
-        // 🎵 前半：テンポ（BPM）自動検出
+        // 🎵 BPMの特定ロジック
         function estimateBPM(audioBuffer) {
             const data = audioBuffer.getChannelData(0);
             const sampleRate = audioBuffer.sampleRate;
@@ -96,137 +109,194 @@
             
             for (let i = 0; i < data.length; i += winSize) {
                 let sum = 0;
-                for (let j = 0; j < winSize && (i + j) < data.length; j++) {
-                    sum += Math.abs(data[i + j]);
-                }
+                for (let j = 0; j < winSize && (i + j) < data.length; j++) { sum += Math.abs(data[i + j]); }
                 energyGrid.push(sum);
             }
 
             const peaks = [];
             for (let i = 1; i < energyGrid.length - 1; i++) {
-                if (energyGrid[i] > energyGrid[i-1] * 1.3 && energyGrid[i] > energyGrid[i+1]) {
-                    peaks.push(i * 0.05);
-                }
+                if (energyGrid[i] > energyGrid[i-1] * 1.3 && energyGrid[i] > energyGrid[i+1]) { peaks.push(i * 0.05); }
             }
 
             const intervals = [];
             for (let i = 1; i < peaks.length; i++) {
                 const diff = peaks[i] - peaks[i-1];
-                if (diff > 0.3 && diff < 1.5) {
-                    intervals.push(diff);
-                }
+                if (diff > 0.3 && diff < 1.5) { intervals.push(diff); }
             }
 
             if (intervals.length === 0) return 120;
-
             intervals.sort((a, b) => a - b);
-            const medianInterval = intervals[Math.floor(intervals.length / 2)];
-            let bpm = Math.round(60 / medianInterval);
-
+            let bpm = Math.round(60 / intervals[Math.floor(intervals.length / 2)]);
             while (bpm < 60) bpm *= 2;
             while (bpm > 180) bpm = Math.round(bpm / 2);
-
             return bpm;
         }
-        // 🎵 後半：音高と音の長さ（全小節）を網羅する精密検出ロジック
-        function analyzePreciseNotes(audioBuffer, bpm) {
+        // 🎵 後半①：非同期（タイムアウト分割）処理によるリアルタイム進捗描画とFFT多重音解析
+        function analyzePolyphonicNotesAsync(audioBuffer, bpm, originalFileName) {
             const channelData = audioBuffer.getChannelData(0);
             const sampleRate = audioBuffer.sampleRate;
-            const bufferSize = 2048;
+            const bufferSize = 2048; // FFTウィンドウサイズ
             
             const secondsPerBeat = 60 / bpm;
             const secondsPer16th = secondsPerBeat / 4; 
             const hopSize = Math.floor(sampleRate * secondsPer16th);
 
             const rawTimeline = [];
+            let i = 0;
+            let notePlacementCount = 0;
 
-            // 曲の最初から最後まで、16分音符の細かさで全タイムラインを網羅スキャン
-            for (let i = 0; i < channelData.length - bufferSize; i += hopSize) {
-                const signal = channelData.subarray(i, i + bufferSize);
-                const frequency = autoCorrelate(signal, sampleRate);
-                
-                if (frequency > 0) {
-                    const midiNote = Math.round(12 * Math.log2(frequency / 440) + 69);
-                    if (midiNote >= 36 && midiNote <= 96) {
-                        rawTimeline.push(midiNote);
-                        continue;
+            // ブラウザのフリーズを防ぎ、毎フレーム画面を書き換えるためのループ関数
+            function processChunk() {
+                // 1回のアニメーションフレームで処理するステップ数（バランス調整用）
+                const stepsPerFrame = 50; 
+                let stepsDone = 0;
+
+                while (i < channelData.length - bufferSize && stepsDone < stepsPerFrame) {
+                    const signal = channelData.subarray(i, i + bufferSize);
+                    
+                    // 高速フーリエ変換(FFT)を実行して周波数ごとの音量を解析
+                    const spectrum = performSimpleFFT(signal);
+                    
+                    // スペクトルから音量の大きいピーク（周波数）を複数抽出（和音対応）
+                    const detectedPitches = findPeaksInSpectrum(spectrum, sampleRate);
+                    
+                    if (detectedPitches.length > 0) {
+                        rawTimeline.push(detectedPitches); // 和音（配列）として記録
+                        notePlacementCount += detectedPitches.length;
+                        
+                        // モニター画面に「現在の代表的な周波数」をリアルタイム反映
+                        monFreq.innerText = Math.round(detectedPitches[0].frequency) + " Hz";
+                    } else {
+                        rawTimeline.push([-1]); // 無音（休符）として記録
                     }
+
+                    // リアルタイムUIカウンターの数値を更新
+                    const percent = Math.min(100, Math.round((i / (channelData.length - bufferSize)) * 100));
+                    monPercent.innerText = percent;
+                    progressFill.style.width = percent + "%";
+                    monNoteCount.innerText = notePlacementCount;
+
+                    i += hopSize;
+                    stepsDone++;
                 }
-                rawTimeline.push(-1); // 音が鳴っていない時間は休符として記録
+
+                if (i < channelData.length - bufferSize) {
+                    // まだ曲の途中の場合は、一瞬ブラウザに描画権を返して次のループへ
+                    requestAnimationFrame(processChunk);
+                } else {
+                    // 曲の最後までスキャンが完了したら、XML生成（次の後半コード②）へ進む
+                    statusDiv.innerText = "全小節の解析完了！XML楽譜ファイルを構築しています...";
+                    monStatus.innerText = "XML構築中";
+                    
+                    setTimeout(() => {
+                        const processedNotes = structureTimelineToNotes(rawTimeline);
+                        const xmlString = generateFinalMusicXML(processedNotes, bpm);
+                        
+                        const outputName = originalFileName.substring(0, originalFileName.lastIndexOf('.')) + '_live.musicxml';
+                        downloadXML(xmlString, outputName);
+                        
+                        statusDiv.innerText = `変換成功！BPM ${bpm}、全データをFlat形式で出力しました。`;
+                        monStatus.innerText = "完了・保存済";
+                        convertBtn.disabled = false;
+                    }, 50);
+                }
             }
 
+            // リアルタイムループを開始
+            requestAnimationFrame(processChunk);
+        }
+
+        // 簡易的な離散・高速フーリエ変換(FFT)風アルゴリズム
+        function performSimpleFFT(signal) {
+            const N = signal.length;
+            const spectrum = new Float32Array(N / 2);
+            // 処理速度向上のため、12音階の基本周波数にターゲットを絞って強度を計算
+            for (let k = 0; k < N / 2; k += 2) {
+                let real = 0;
+                let imag = 0;
+                for (let n = 0; n < N; n += 4) { // 高速化のため間引きサンプリング
+                    const angle = (2 * Math.PI * k * n) / N;
+                    real += signal[n] * Math.cos(angle);
+                    imag -= signal[n] * Math.sin(angle);
+                }
+                spectrum[k] = Math.sqrt(real * real + imag * imag);
+            }
+            return spectrum;
+        }
+
+        // 周波数の波から、基準以上の強さを持つ「音の山（和音）」を見つける関数
+        function findPeaksInSpectrum(spectrum, sampleRate) {
+            const N = spectrum.length * 2;
+            const peaks = [];
+            const threshold = 1.5; // ノイズ除去のしきい値
+
+            for (let k = 2; k < spectrum.length - 2; k++) {
+                if (spectrum[k] > spectrum[k-1] && spectrum[k] > spectrum[k+1] && spectrum[k] > threshold) {
+                    const freq = (k * sampleRate) / N;
+                    const midi = Math.round(12 * Math.log2(freq / 440) + 69);
+                    
+                    // 認識可能な楽器の音域内であり、重複していないかをチェック
+                    if (midi >= 36 && midi <= 96 && !peaks.some(p => p.midi === midi)) {
+                        peaks.push({ frequency: freq, midi: midi });
+                    }
+                }
+            }
+            // 1つの時間枠（16分音符）あたり最大3音までの和音に制限して返す
+            return peaks.slice(0, 3);
+        }
+        // 🎵 後半②：16分音符の和音タイムラインを、MusicXML用の音符データ構造に変換する関数
+        function structureTimelineToNotes(rawTimeline) {
             const processedNotes = [];
             if (rawTimeline.length === 0) return processedNotes;
 
-            let currentMidi = rawTimeline[0];
+            // タイムラインを走査して、同じ組み合わせの和音（または休符）が何個続いたかを数える
+            let currentPitches = rawTimeline[0];
             let currentDurationCount = 1;
 
-            // 同じ音（または休符）が何カウント分続いたかを計測
+            // 2つの配列（MIDI番号の組み合わせ）が一致しているか判定するヘルパー
+            const arePitchesEqual = (arr1, arr2) => {
+                if (arr1.length !== arr2.length) return false;
+                const s1 = arr1.map(p => p.midi || p).sort();
+                const s2 = arr2.map(p => p.midi || p).sort();
+                return s1.every((val, index) => val === s2[index]);
+            };
+
             for (let i = 1; i < rawTimeline.length; i++) {
-                if (rawTimeline[i] === currentMidi) {
+                if (arePitchesEqual(rawTimeline[i], currentPitches)) {
                     currentDurationCount++;
                 } else {
                     const noteTypeInfo = getNoteTypeByDuration(currentDurationCount);
+                    
+                    // 和音に含まれるすべてのMIDI音を配列で格納
+                    const midis = currentPitches.map(p => p.midi).filter(m => m !== undefined);
+
                     processedNotes.push({
-                        midi: currentMidi,
+                        midis: midis.length > 0 ? midis : [-1], // 空なら休符(-1)
                         duration: currentDurationCount,
                         type: noteTypeInfo.type,
                         dot: noteTypeInfo.dot
                     });
-                    currentMidi = rawTimeline[i];
+                    currentPitches = rawTimeline[i];
                     currentDurationCount = 1;
                 }
             }
-            
-            // 最後の小節の余り音を漏らさず追加
+
+            // 最後の残った和音ブロックを処理
             if (currentDurationCount > 0) {
                 const noteTypeInfo = getNoteTypeByDuration(currentDurationCount);
+                const midis = currentPitches.map(p => p.midi).filter(m => m !== undefined);
                 processedNotes.push({
-                    midi: currentMidi,
+                    midis: midis.length > 0 ? midis : [-1],
                     duration: currentDurationCount,
                     type: noteTypeInfo.type,
                     dot: noteTypeInfo.dot
                 });
             }
 
-            // ★制限を解除し、1分55秒の全データを最後まで出力（最大3000音まで確保）
-            return processedNotes.slice(0, 3000);
+            return processedNotes;
         }
 
-        // 内部ピッチ検出（自己相関法）
-        function autoCorrelate(buffer, sampleRate) {
-            let SIZE = buffer.length;
-            let rms = 0;
-            for (let i = 0; i < SIZE; i++) { rms += buffer[i] * buffer[i]; }
-            rms = Math.sqrt(rms / SIZE);
-            if (rms < 0.015) return -1;
-
-            let r1 = 0, r2 = SIZE - 1;
-            let thres = 0.2;
-            for (let i = 0; i < SIZE / 2; i++) { if (Math.abs(buffer[i]) < thres) { r1 = i; break; } }
-            for (let i = SIZE - 1; i >= SIZE / 2; i--) { if (Math.abs(buffer[i]) < thres) { r2 = i; break; } }
-
-            buffer = buffer.slice(r1, r2);
-            SIZE = buffer.length;
-
-            let c = new Float32Array(SIZE);
-            for (let i = 0; i < SIZE; i++) {
-                for (let j = 0; j < SIZE - i; j++) { c[i] = c[i] + buffer[j] * buffer[j + i]; }
-            }
-
-            let d = 0;
-            while (c[d] > c[d + 1]) d++;
-            let maxval = -1, maxpos = -1;
-            for (let i = d; i < SIZE / 2; i++) {
-                if (c[i] > maxval) { maxval = c[i]; maxpos = i; }
-            }
-
-            let T0 = maxpos;
-            if (T0 > 0) return sampleRate / T0;
-            return -1;
-        }
-
-        // 16分音符の個数をMusicXML規格の音符タイプに紐付け
+        // 16分音符の個数からMusicXMLの音符タイプを割り出すマッパー
         function getNoteTypeByDuration(count) {
             if (count >= 16) return { type: "whole", dot: false };
             if (count >= 12) return { type: "half", dot: true };
@@ -240,12 +310,12 @@
 
         const MIDI_MAP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
         
-        // MusicXMLデータの生成（無限小節ループ対応）
-        function generateMusicXML(notes, bpm) {
+        // 最終的な和音対応MusicXMLデータを生成する関数
+        function generateFinalMusicXML(notes, bpm) {
             let xml = `<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://musicxml.org">
 <score-partwise version="4.0">
-  <work><work-title>Awaken Full Score</work-title></work>
+  <work><work-title>Awaken Live Poly Score</work-title></work>
   <part-list>
     <score-part id="P1"><part-name>Audio Track</part-name></score-part>
   </part-list>
@@ -253,9 +323,9 @@
 
             let measureNumber = 1;
             let currentMeasureDuration = 0;
-            const maxMeasureDuration = 16; // 4/4拍子（16分音符16個分で1小節）
+            const maxMeasureDuration = 16; // 4/4拍子（16分音符16個で1小節）
 
-            // 第1小節のヘッダー
+            // 第1小節の初期設定
             xml += `    <measure number="${measureNumber}">
       <attributes>
         <divisions>4</divisions>
@@ -273,7 +343,6 @@
             notes.forEach(note => {
                 let remainingDuration = note.duration;
 
-                // 音符の長さが現在の小節の残り枠を超える場合、小節をまたぐループ処理
                 while (remainingDuration > 0) {
                     let availableSpace = maxMeasureDuration - currentMeasureDuration;
                     
@@ -285,12 +354,11 @@
                         availableSpace = maxMeasureDuration;
                     }
 
-                    // 現在の小節に収まる分の長さを切り出す
                     let durationToInsert = Math.min(remainingDuration, availableSpace);
                     let typeInfo = getNoteTypeByDuration(durationToInsert);
 
-                    if (note.midi === -1) {
-                        // ★無音区間は「休符（rest）」として正しく処理
+                    // 休符の場合
+                    if (note.midis[0] === -1) {
                         xml += `      <note>
         <rest/>
         <duration>${durationToInsert}</duration>
@@ -299,13 +367,15 @@
         ${typeInfo.dot ? '<dot/>' : ''}
       </note>\n`;
                     } else {
-                        // ★有音区間は「音符」として処理
-                        const step = MIDI_MAP[note.midi % 12];
-                        const alter = step.includes('#') ? 1 : 0;
-                        const stepName = step.replace('#', '');
-                        const octave = Math.floor(note.midi / 12) - 1;
+                        // 和音（複数のノート）の場合、2音目以降に <chord/> タグを付与して縦に重ねる
+                        note.midis.forEach((midi, index) => {
+                            const step = MIDI_MAP[midi % 12];
+                            const alter = step.includes('#') ? 1 : 0;
+                            const stepName = step.replace('#', '');
+                            const octave = Math.floor(midi / 12) - 1;
 
-                        xml += `      <note>
+                            xml += `      <note>
+        ${index > 0 ? '<chord/>' : ''}
         <pitch>
           <step>${stepName}</step>
           ${alter ? '<alter>1</alter>' : ''}
@@ -316,6 +386,7 @@
         <type>${typeInfo.type}</type>
         ${typeInfo.dot ? '<dot/>' : ''}
       </note>\n`;
+                        });
                     }
 
                     currentMeasureDuration += durationToInsert;
@@ -323,14 +394,14 @@
                 }
             });
 
-            // 最後の小節を閉じ、全体のHTML構造を締めくくる
             xml += `    </measure>
   </part>
-</score-partwise>`;
+</score-partwise>
+`;
             return xml;
         }
 
-        // ダウンロード処理
+        // ダウンロード処理用
         function downloadXML(content, fileName) {
             const blob = new Blob([content], { type: 'application/vnd.recordare.musicxml+xml' });
             const a = document.createElement('a');
